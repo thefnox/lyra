@@ -165,8 +165,8 @@ local function acquireLock(params: AcquireLockParams): Promise.TPromise<LockHand
 				end
 			end
 
-			if isStudio then
-				-- In Studio, ignore existing locks to facilitate testing.
+			if isStudio or ctx.useMock then
+				-- In Studio or when using mock, ignore existing locks to facilitate testing.
 				otherLockId = nil
 			end
 
@@ -377,59 +377,61 @@ local function acquireLock(params: AcquireLockParams): Promise.TPromise<LockHand
 
 		local currentRefreshHandle: Types.RetryHandle? = nil
 
-        refreshPromise = Promise.new(function(resolveLoop: (...any) -> (), _, onCancelLoop: (abortHandler: () -> ()?) -> boolean)
-            -- Setup cancellation for the refresh loop promise itself.
-			onCancelLoop(function()
-				logger:log("trace", "refreshPromise cancelled")
-				-- If a refresh attempt is in progress, cancel its retry handle.
-				if currentRefreshHandle then
-					currentRefreshHandle.cancel()
-				end
-			end)
+		refreshPromise = Promise.new(
+			function(resolveLoop: (...any) -> (), _, onCancelLoop: (abortHandler: () -> ()?) -> boolean)
+				-- Setup cancellation for the refresh loop promise itself.
+				onCancelLoop(function()
+					logger:log("trace", "refreshPromise cancelled")
+					-- If a refresh attempt is in progress, cancel its retry handle.
+					if currentRefreshHandle then
+						currentRefreshHandle.cancel()
+					end
+				end)
 
-			-- Run the refresh loop in a separate thread to allow
-			-- cancellation without abruptly stopping via coroutine.close.
-			task.spawn(function()
-				-- Continue looping as long as the lock is considered 'held'.
-				while status == "held" do
-					-- Wait for the specified refresh interval.
-					task.wait(params.refreshInterval)
+				-- Run the refresh loop in a separate thread to allow
+				-- cancellation without abruptly stopping via coroutine.close.
+				task.spawn(function()
+					-- Continue looping as long as the lock is considered 'held'.
+					while status == "held" do
+						-- Wait for the specified refresh interval.
+						task.wait(params.refreshInterval)
 
-					-- Check for cancellation or status change during the wait.
-					if onCancelLoop() or status ~= "held" then
-						logger:log("trace", "exiting refresh loop due to cancellation or status change")
-						break
+						-- Check for cancellation or status change during the wait.
+						if onCancelLoop() or status ~= "held" then
+							logger:log("trace", "exiting refresh loop due to cancellation or status change")
+							break
+						end
+
+						logger:log("trace", "attempting lock refresh")
+						-- Attempt to update the lock TTL using tryUpdate.
+						currentRefreshHandle = tryUpdate(params.duration)
+						-- Await the result of the refresh attempt
+						local resolved, value = (currentRefreshHandle :: any).promise:await()
+						currentRefreshHandle = nil -- Clear handle once settled
+
+						-- Check status again after the refresh attempt.
+						if status ~= "held" then
+							logger:log("trace", "exiting refresh loop, status changed during refresh attempt")
+							break
+						end
+
+						-- If refresh failed (rejected or returned nil), the lock is lost.
+						if not resolved or value == nil then
+							logger:log("warn", "failed to refresh lock, lock considered lost", { error = value })
+							-- Trigger expiry callbacks and exit the loop.
+							spawnExpiryCallbacks()
+							break
+						else
+							logger:log("trace", "lock refreshed successfully")
+						end
 					end
 
-					logger:log("trace", "attempting lock refresh")
-					-- Attempt to update the lock TTL using tryUpdate.
-					currentRefreshHandle = tryUpdate(params.duration)
-					-- Await the result of the refresh attempt
-					local resolved, value = (currentRefreshHandle :: any).promise:await()
-					currentRefreshHandle = nil -- Clear handle once settled
-
-					-- Check status again after the refresh attempt.
-					if status ~= "held" then
-						logger:log("trace", "exiting refresh loop, status changed during refresh attempt")
-						break
-					end
-
-					-- If refresh failed (rejected or returned nil), the lock is lost.
-					if not resolved or value == nil then
-						logger:log("warn", "failed to refresh lock, lock considered lost", { error = value })
-						-- Trigger expiry callbacks and exit the loop.
-						spawnExpiryCallbacks()
-						break
-					else
-						logger:log("trace", "lock refreshed successfully")
-					end
-				end
-
-				-- Loop exited (either normally due to status change/cancellation, or due to refresh failure).
-				logger:log("trace", "background refresh loop finished")
-				resolveLoop() -- Resolve the main refreshPromise.
-			end)
-        end)
+					-- Loop exited (either normally due to status change/cancellation, or due to refresh failure).
+					logger:log("trace", "background refresh loop finished")
+					resolveLoop() -- Resolve the main refreshPromise.
+				end)
+			end
+		)
 	end
 
 	-- Construct the LockHandle object to be returned.

@@ -139,7 +139,11 @@ type StoreImpl<T> = {
 	__index: StoreImpl<T>,
 
 	-- Internal helper methods
-	_withSession: (self: Store<T>, key: string, callback: (session: Session.Session<any>) -> (Promise.TPromise<any>)) -> Promise.Promise,
+	_withSession: (
+		self: Store<T>,
+		key: string,
+		callback: (session: Session.Session<any>) -> Promise.TPromise<any>
+	) -> Promise.Promise,
 	_getKeyInfo: (self: Store<T>, key: string) -> Promise.TPromise<DataStoreKeyInfo?>,
 
 	-- Core public API (Promise-based)
@@ -230,7 +234,6 @@ local function createStore<T>(config: StoreConfig<T>): Store<T>
 	local dataStoreService = config.dataStoreService
 	if dataStoreService == nil then
 		if config.useMock then
-            assert(RunService:IsStudio(), "useMock can only be true in Studio")
 			logger:log("info", `using mock DataStoreService`)
 			dataStoreService = MockDataStoreService.new()
 		else
@@ -244,7 +247,6 @@ local function createStore<T>(config: StoreConfig<T>): Store<T>
 	local memoryStoreService = config.memoryStoreService
 	if memoryStoreService == nil then
 		if config.useMock then
-            assert(RunService:IsStudio(), "useMock can only be true in Studio")
 			logger:log("info", `using mock MemoryStoreService`)
 			memoryStoreService = MockMemoryStoreService.new()
 		else
@@ -272,7 +274,7 @@ local function createStore<T>(config: StoreConfig<T>): Store<T>
 		logger = logger,
 		onLockLost = config.onLockLost,
 		useDSSLocking = config.useDSSLocking == true,
-        useMock = config.useMock == true,
+		useMock = config.useMock == true,
 
 		-- Get specific DataStore/MemoryStore instances using derived names/scopes.
 		recordStore = dataStoreService:GetDataStore(`{Constants.RECORD_SCOPE}/{config.name}`),
@@ -289,13 +291,13 @@ local function createStore<T>(config: StoreConfig<T>): Store<T>
 		error(`Failed to validate template for store '{config.name}': {err}`)
 	end
 
-    local storeProps: StoreProps<T> = {
+	local storeProps: StoreProps<T> = {
 		_ctx = storeContext,
 		_closed = false,
 		_sessions = {},
 		_loadPromises = {},
 		_unloadPromises = {},
-    }
+	}
 
 	logger:log("trace", `created store`)
 	return setmetatable(storeProps, Store) :: Store<T>
@@ -396,36 +398,38 @@ function Store:load(key: string, userIds: { number }?): Promise.Promise
 		userIds = userIds,
 	}
 	-- Chain the actual session loading after the potential unload wait.
-	local loadPromise = waitForUnload:andThenCall(Session.load, sessionLoadParams):andThen(function(session: Session.Session<any>)
-		-- Check if the store was closed *while* this load was in progress.
-		if self._closed then
-			logger:log("warn", "store closed before key loaded, unloading immediately")
-			-- If closed, immediately start unloading the session that was just loaded.
-			self._unloadPromises[key] = session:unload():finally(function()
-				logger:log("trace", "key unloaded after store closed during load")
-				self._unloadPromises[key] = nil
-			end)
-			return Promise.reject("Store closed before key loaded")
-		end
-
-		-- Session was loaded successfully; let's store it, start autosaving,
-		-- and set up lock loss handling.
-
-		self._sessions[key] = session
-
-		session:startAutosaving()
-
-		session.lockHandle.onLockLost(function()
-			logger:log("warn", "lock lost for key, removing session")
-			if self._ctx.onLockLost then
-				-- Use pcall as user callback could error.
-				pcall(self._ctx.onLockLost, key)
+	local loadPromise = waitForUnload
+		:andThenCall(Session.load, sessionLoadParams)
+		:andThen(function(session: Session.Session<any>)
+			-- Check if the store was closed *while* this load was in progress.
+			if self._closed then
+				logger:log("warn", "store closed before key loaded, unloading immediately")
+				-- If closed, immediately start unloading the session that was just loaded.
+				self._unloadPromises[key] = session:unload():finally(function()
+					logger:log("trace", "key unloaded after store closed during load")
+					self._unloadPromises[key] = nil
+				end)
+				return Promise.reject("Store closed before key loaded")
 			end
-			-- Remove the session as it's no longer valid without the lock.
-			self._sessions[key] = nil
+
+			-- Session was loaded successfully; let's store it, start autosaving,
+			-- and set up lock loss handling.
+
+			self._sessions[key] = session
+
+			session:startAutosaving()
+
+			session.lockHandle.onLockLost(function()
+				logger:log("warn", "lock lost for key, removing session")
+				if self._ctx.onLockLost then
+					-- Use pcall as user callback could error.
+					pcall(self._ctx.onLockLost, key)
+				end
+				-- Remove the session as it's no longer valid without the lock.
+				self._sessions[key] = nil
+			end)
+			logger:log("debug", "key loaded successfully")
 		end)
-		logger:log("debug", "key loaded successfully")
-	end)
 
 	-- Store the load promise to handle concurrent calls.
 	self._loadPromises[key] = loadPromise
@@ -856,7 +860,7 @@ local function txInternal<V>(
 				currentState[key] = session.data :: V
 			end
 
-			local nextState: {[string]: V}
+			local nextState: { [string]: V }
 			if immutable then
 				-- If immutable, the transformFunction has to handle
 				-- copy-on-write semantics itself, and we'll pass the current
@@ -871,7 +875,7 @@ local function txInternal<V>(
 
 			-- 2. Execute the user's transform function.
 			-- Use noYield to prevent yielding within the transform function.
-			local transformOk, result: {[string]: V} | boolean = pcall(noYield, transformFunction, nextState :: any)
+			local transformOk, result: { [string]: V } | boolean = pcall(noYield, transformFunction, nextState :: any)
 			if not transformOk then
 				logger:log("error", "tx transformFunction failed", { error = result })
 				return Promise.reject(`Store:tx transformFunction failed: {result}`)
@@ -897,7 +901,7 @@ local function txInternal<V>(
 			end
 
 			if immutable then
-				nextState = result :: {[string]: V}
+				nextState = result :: { [string]: V }
 			end
 
 			-- We freeze the nextState to prevent further modifications.
@@ -1225,7 +1229,7 @@ function Store:close(): Promise.Promise
 	local rejections = {}
 
 	-- Initiate unload for all currently active sessions.
-	local unloadPromises: {Promise.Promise} = {}
+	local unloadPromises: { Promise.Promise } = {}
 	for key, _ in self._sessions do
 		if self._unloadPromises[key] then
 			logger:log("trace", "key already being unloaded", { key = key })
